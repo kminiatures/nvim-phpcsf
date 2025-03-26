@@ -2,7 +2,7 @@ local M = {};
 local root = vim.loop.cwd()
 local phpcs_path = "$HOME/.config/composer/vendor/bin/phpcs"
 local phpcbf_path = "$HOME/.config/composer/vendor/bin/phpcbf"
-local phpcs_standard = "PSR2"
+local phpcs_standard = nil
 
 local Job = require'plenary.job'
 local lutils = require('phpcs.utils')
@@ -14,6 +14,9 @@ M.phpcs_standard = vim.g.nvim_phpcs_config_phpcs_standard or phpcs_standard
 M.last_stderr = ''
 M.last_stdout = ''
 M.nvim_namespace = nil
+M.max_line_numbers = 1000
+
+M.phpcs_job_count = 0;
 
 M.detect_local_paths = function ()
     if (lutils.file_exists('phpcs.xml')) then
@@ -32,19 +35,37 @@ M.detect_local_paths = function ()
 end
 
 M.cs = function ()
+    if vim.fn.executable(M.phpcs_path) == 0 then
+    	return
+    end
+
+    if M.phpcs_job_count >= 2 then
+        return
+    end
+
+    M.phpcs_job_count = M.phpcs_job_count + 1
+
+    if M.phpcs_job_count > 1 then
+        return
+    end
+
 	local bufnr = vim.api.nvim_get_current_buf()
 
     local report_file = os.tmpname();
 
-	local opts = {
+    local args = {
+        "--stdin-path=" .. vim.api.nvim_buf_get_name(bufnr),
+        "--report=json",
+        "--report-file=" .. report_file,
+    }
+    if M.phpcs_standard then
+        table.insert(args, "--standard=" .. M.phpcs_standard)
+    end
+    table.insert(args, "-")
+
+    local opts = {
 		command = M.phpcs_path,
-  		args = {
-    		"--stdin-path=" .. vim.api.nvim_buf_get_name(bufnr),
-			"--report=json",
-            "--report-file=" .. report_file,
-			"--standard=" .. M.phpcs_standard,
-    		"-"
-  		},
+  		args = args,
       	writer = vim.api.nvim_buf_get_lines(bufnr, 0, -1, true),
   		on_exit = vim.schedule_wrap(function()
             local file = io.open(report_file, "r")
@@ -52,6 +73,13 @@ M.cs = function ()
                 local content = file:read("*a")
                 M.publish_diagnostic(content, bufnr)
             end
+
+            M.phpcs_job_count = M.phpcs_job_count - 1
+
+            if M.phpcs_job_count > 0 then
+                M.phpcs_job_count = 0
+               M.cs()
+           end
   		end),
   	}
 
@@ -66,22 +94,29 @@ end
     }
 ]]
 M.cbf = function (new_opts)
+    if vim.fn.executable(M.phpcbf_path) == 0 then
+    	return
+    end
+
 	new_opts = new_opts or {}
   	new_opts.bufnr = new_opts.bufnr or vim.api.nvim_get_current_buf()
 
   	if not new_opts.force then
-  		if vim.api.nvim_buf_line_count(new_opts.bufnr) > 1000 then
-  			print("File too large. Ignoring code beautifier" )
+  		if M.max_line_numbers and vim.api.nvim_buf_line_count(new_opts.bufnr) > M.max_line_numbers then
+  			-- print("File too large. Ignoring code beautifier" )
   			return
   		end
   	end
+    local args = {}
+    if M.phpcs_standard then
+        table.insert(args, "--standard=" .. M.phpcs_standard)
+
+    end
+    table.insert(args, vim.api.nvim_buf_get_name(new_opts.bufnr))
 
 	local opts = {
 		command = M.phpcbf_path,
-  		args = {
-			"--standard=" .. M.phpcs_standard,
-            vim.api.nvim_buf_get_name(new_opts.bufnr)
-  		},
+  		args = args,
   		on_exit = vim.schedule_wrap(function(j)
             if j.code ~= 0 then
                 vim.cmd("e")
@@ -155,6 +190,10 @@ M.setup = function (opts)
 
     if opts.standard ~= nil then
         M.phpcs_standard = opts.standard
+    end
+
+    if opts.max_line_numbers ~= nil then
+        M.max_line_numbers = opts.max_line_numbers
     end
 end
 
